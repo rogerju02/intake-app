@@ -1,6 +1,5 @@
 import streamlit as st
 from PIL import Image 
-import cv2
 import numpy as np
 from ultralytics import YOLO
 import io
@@ -18,8 +17,12 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
-SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
+try:
+    SHOPIFY_STORE_URL = st.secrets.get("SHOPIFY_STORE_URL", os.getenv("SHOPIFY_STORE_URL"))
+    SHOPIFY_ACCESS_TOKEN = st.secrets.get("SHOPIFY_ACCESS_TOKEN", os.getenv("SHOPIFY_ACCESS_TOKEN"))
+except:
+    SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
+    SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
 
 st.title("CBD Intake Form")
 
@@ -611,11 +614,12 @@ else:
         st.image(image, caption="Input Image", width=150)
         
         if not st.session_state.detection_complete:
-            img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            rgb_image = image.convert('RGB')
+            img_array = np.array(image)
             model = YOLO("yolov8n.pt")
 
             with st.spinner("Detecting items..."):
-                results = model(img_cv)[0]
+                results = model(img_array)[0]
             
             boxes = results.boxes.xyxy if results.boxes else []
             
@@ -630,15 +634,14 @@ else:
         if len(boxes) == 0:
             st.warning("No items detected. Try uploading a different image.")
         else:
-            img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+            img_array = np.array(image)
 
             for i, box in enumerate(boxes):
                 x1, y1, x2, y2 = box
-                crop = img_cv[y1:y2, x1:x2]
-                if crop.size == 0:
+                crop_array = img_array[y1:y2, x1:x2]
+                if crop_array.size == 0:
                     continue
-                crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
-                crop_pil = Image.fromarray(crop_rgb)
+                crop_pil = Image.fromarray(crop_array)
                 
                 col1, col2 = st.columns([1, 2])
                 
