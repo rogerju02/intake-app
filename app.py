@@ -24,6 +24,11 @@ except:
     SHOPIFY_STORE_URL = os.getenv("SHOPIFY_STORE_URL")
     SHOPIFY_ACCESS_TOKEN = os.getenv("SHOPIFY_ACCESS_TOKEN")
 
+# Cache the model to prevent reloading everytime
+@st.cache_resource
+def load_model():
+    return YOLO("yolov8m.pt")
+
 st.title("CBD Intake Form")
 
 # Shopify API functions
@@ -123,7 +128,9 @@ def init_session_state():
         'starting_item_number': 0,
         'consigner_type_selection': "New Consigner",
         'consigner_search_result': None,
-        'searched_account_number': ""
+        'searched_account_number': "",
+        'item_images': {},
+        'adding_photo_for_item': None 
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -142,6 +149,8 @@ def clear_all_data():
     st.session_state.num_items = 0
     st.session_state.form_values = {}
     st.session_state.had_active_input = False
+    st.session_state.item_images = {}
+    st.session_state.adding_photo_for_item = None
 
 def save_form_values():
     for i in range(st.session_state.num_items):
@@ -167,6 +176,7 @@ def process_new_image(image_bytes):
         st.session_state.detection_complete = False
         st.session_state.num_items = 0
         st.session_state.form_values = {}
+        st.session_state.item_images = {}
     st.session_state.had_active_input = True
 
 def get_accepted_items_count():
@@ -357,7 +367,7 @@ def generate_pdf(customer_name, customer_address, account_number, phone_number, 
     buffer.seek(0)
     return buffer
 
-# Form creation page
+# Form Creation Page
 if st.session_state.show_form:
     # Company Header
     st.markdown("""
@@ -377,44 +387,28 @@ if st.session_state.show_form:
     
     # Customer info section - only show for new consigners
     if is_new_consigner:
+        customer_name = st.text_input("Customer Name", value=get_form_value("customer_name", ""))
+        customer_address = st.text_area("Customer Address", value=get_form_value("customer_address", ""), height=100)
+        
         col1, col2 = st.columns(2)
         with col1:
-            customer_name = st.text_input("Customer Name", value=get_form_value("customer_name", ""))
-            customer_address = st.text_area("Customer Address", value=get_form_value("customer_address", ""), height=100)
-        with col2:
             account_number = st.text_input("Account #", value=get_form_value("account_number", ""))
+        with col2:
             phone_number = st.text_input("Phone", value=get_form_value("phone_number", ""))
         
         st.divider()
     else:
-        # For existing consigners, use saved values
         customer_name = get_form_value("customer_name", "")
         customer_address = get_form_value("customer_address", "")
         account_number = get_form_value("searched_account_number", "")
         phone_number = get_form_value("phone_number", "")
     
-    # Date and page info
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(f"**Today's Date:** {datetime.now().strftime('%m/%d/%Y')}")
-    with col2:
-        st.markdown(f"**Account #:** {account_number or 'N/A'}")
-    with col3:
-        st.markdown(f"**Phone:** {phone_number or 'N/A'}")
-    with col4:
-        st.markdown("**Page #:** 1")
+    # Info row
+    st.markdown(f"**Today's Date:** {datetime.now().strftime('%m/%d/%Y')} | **Account #:** {account_number or 'N/A'} | **Phone:** {phone_number or 'N/A'}")
     
     st.divider()
     
-    # Table header
-    cols = st.columns([1.2, 0.8, 2.5, 0.8, 1, 0.5, 0.5, 0.7, 1])
-    headers = ["Date Processed", "Item #", "Title", "Status", "Price", "PC", "QTY", "Cost", "Pickup Date"]
-    for col, header in zip(cols, headers):
-        col.markdown(f"**{header}**")
-    
-    st.divider()
-    
-    # Table rows for accepted items
+    # Items table - mobile friendly card view
     total_price = 0.0
     item_count = 0
     current_item_num = starting_item_num
@@ -424,310 +418,307 @@ if st.session_state.show_form:
             item_count += 1
             price = get_form_value(f'price_{i}', 0.0)
             total_price += price
+            name = get_form_value(f"name_{i}", "") or ""
+            notes = get_form_value(f"notes_{i}", "")
             
-            cols = st.columns([1.2, 0.8, 2.5, 0.8, 1, 0.5, 0.5, 0.7, 1])
-            
-            with cols[0]:
-                st.write(datetime.now().strftime('%m/%d/%Y'))
-            with cols[1]:
-                st.write(str(current_item_num))
-            with cols[2]:
-                name = get_form_value(f"name_{i}", "") or ""
-                notes = get_form_value(f"notes_{i}", "")
-                if name:
-                    st.markdown(f"**{name}**")
-                if notes:
-                    st.caption(notes)
-            with cols[3]:
-                st.write("A")
-            with cols[4]:
-                st.write(f"${price:.2f}")
-            with cols[5]:
-                st.write("A")
-            with cols[6]:
-                st.write("1")
-            with cols[7]:
-                st.write("")
-            with cols[8]:
-                st.write("")
-            
+            # Mobile-friendly item card
+            st.markdown(f"""
+                <div style="background: #f8f8f8; padding: 10px; border-radius: 5px; margin-bottom: 10px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <strong>#{current_item_num}</strong>
+                        <strong>${price:.2f}</strong>
+                    </div>
+                    <div style="margin-top: 5px;">{name}</div>
+                    {f'<div style="color: #666; font-size: 0.9em;">{notes}</div>' if notes else ''}
+                </div>
+                """, unsafe_allow_html=True)
+
             current_item_num += 1
     
-    st.divider()
-    
-    # Summary row
-    cols = st.columns([2, 3, 1.5, 1.5, 1])
-    with cols[0]:
-        st.markdown(f"**{item_count} Unique Items**")
-    with cols[1]:
-        st.markdown(f"**Quantity on Hand: {item_count}**")
-    with cols[2]:
-        st.markdown(f"**${total_price:.2f}**")
-    with cols[3]:
-        st.markdown("**$0.00**")
     
     st.divider()
     
     # Action buttons
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col1:
-        if st.button("← Back to Detection"):
-            st.session_state.form_values["customer_name"] = customer_name
-            st.session_state.form_values["customer_address"] = customer_address
-            st.session_state.form_values["account_number"] = account_number
-            st.session_state.form_values["phone_number"] = phone_number
-            st.session_state.show_form = False
-            st.session_state.had_active_input = False
-            st.rerun()
-    with col3:
-        pdf_buffer = generate_pdf(
-            customer_name, 
-            customer_address, 
-            account_number, 
-            phone_number,
-            starting_item_num,
-            is_new_consigner
-        )
-        st.download_button(
-            label="📥 Download PDF",
-            data=pdf_buffer,
-            file_name=f"intake_form_{account_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-            mime="application/pdf"
-        )
-
+    if st.button("← Back to Detection", use_container_width=True):
+        st.session_state.form_values["customer_name"] = customer_name
+        st.session_state.form_values["customer_address"] = customer_address
+        st.session_state.form_values["account_number"] = account_number
+        st.session_state.form_values["phone_number"] = phone_number
+        st.session_state.show_form = False
+        st.session_state.had_active_input = False
+        st.rerun()
+    
+    pdf_buffer = generate_pdf(
+        customer_name, 
+        customer_address, 
+        account_number, 
+        phone_number,
+        starting_item_num,
+        is_new_consigner
+    )
+    st.download_button(
+        label="📥 Download PDF",
+        data=pdf_buffer,
+        file_name=f"intake_form_{account_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+        type="primary"
+    )
 # Detection page
 else:
-    # Consigner type selection
-    st.subheader("Consigner Information")
-    
-    default_index = 0 if get_form_value('consigner_type_selection', "New Consigner") == "New Consigner" else 1
-    
-    consigner_type = st.radio(
-        "Consigner Type:",
-        ["New Consigner", "Existing Consigner"],
-        horizontal=True,
-        index=default_index,
-        key="consigner_type_radio"
-    )
-    
-    st.session_state.consigner_type_selection = consigner_type
-    
-    if consigner_type == "New Consigner":
-        st.session_state.is_new_consigner = True
-        st.session_state.starting_item_number = 0
-        st.session_state.consigner_search_result = None
-        st.session_state.searched_account_number = ""
-    else:
-        st.session_state.is_new_consigner = False
+    # Check if we're in "add photo" mode for a specific item
+    if st.session_state.adding_photo_for_item is not None:
+        item_idx = st.session_state.adding_photo_for_item
+        st.subheader(f"Add Photo for Item {item_idx + 1}")
         
-        col1, col2 = st.columns([3, 1])
+        photo_input = st.file_uploader(
+            "Take a photo or choose from library",
+            type=["jpeg", "png", "jpg"],
+            key=f"add_photo_input_{item_idx}"
+        )
+        
+        if photo_input:
+            # Show preview
+            preview_image = Image.open(io.BytesIO(photo_input.getvalue()))
+            st.image(preview_image, caption="Preview", width=300)
+            
+            # Auto-save when photo is selected
+            st.session_state.item_images[item_idx] = photo_input.getvalue()
+            st.success("✓ Photo captured!")
+        
+        col1, col2 = st.columns(2)
+        
         with col1:
-            account_search = st.text_input(
-                "Account Number:",
-                value=get_form_value('searched_account_number', ''),
-                placeholder="Enter account number (e.g., 6732)",
-                key="account_search_input"
-            )
+            if st.button("✓ Done", type="primary", use_container_width=True):
+                st.session_state.adding_photo_for_item = None
+                st.rerun()
+        
         with col2:
-            st.write("")
-            st.write("")
-            search_clicked = st.button("🔍 Search", use_container_width=True)
-        
-        if search_clicked and account_search:
-            with st.spinner(f"Searching for account {account_search}..."):
-                result, error = search_consigner_by_account(account_search)
-                
-                if error:
-                    st.error(error)
-                    st.session_state.consigner_search_result = None
-                else:
-                    st.session_state.consigner_search_result = result
-                    st.session_state.searched_account_number = account_search
-                    st.session_state.starting_item_number = result['next_item_number']
-        
-        if st.session_state.consigner_search_result:
-            result = st.session_state.consigner_search_result
-            
-            st.success(f"✓ Found account {result['account_number']}")
-            
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Items on File", result['total_items'])
-            with col2:
-                st.metric("Highest Item #", result['highest_item_number'])
-            with col3:
-                st.metric("Next Item # Starts At", result['next_item_number'])
-            
-            with st.expander("View Recent Items"):
-                recent_items = result['items'][-10:]
-                for item in reversed(recent_items):
-                    st.write(f"**#{item['item_number']}**: {item['title'][:50]} - ${item['price']} (Qty: {item['qty']})")
-            
-            st.session_state.starting_item_number = result['next_item_number']
-        
-        elif account_search and not search_clicked:
-            saved_account = get_form_value('searched_account_number', '')
-            if saved_account and saved_account == account_search:
-                st.session_state.starting_item_number = get_form_value('starting_item_number', 0)
-                st.info(f"Using previously found data. Next item starts at #{st.session_state.starting_item_number}")
+            if st.button("✕ Cancel", use_container_width=True):
+                # Remove the photo if they cancel AND this was a newly added item
+                if item_idx >= len(st.session_state.boxes_data):
+                    if item_idx in st.session_state.item_images:
+                        del st.session_state.item_images[item_idx]
+                    st.session_state.num_items -= 1
+                st.session_state.adding_photo_for_item = None
+                st.rerun()
     
-    st.divider()
-    
-    # Item Detection Section
-    st.subheader("Item Detection")
-    
-    input_mode = st.radio(
-        "Choose image source:", 
-        ["Upload Image", "Take Photo"], 
-        horizontal=True,
-        key="input_mode"
-    )
-
-    has_active_input = False
-
-    if input_mode == "Take Photo":
-        camera_image = st.camera_input("Take a picture of the items")
-        if camera_image:
-            has_active_input = True
-            process_new_image(camera_image.getvalue())
     else:
-        uploaded_file = st.file_uploader("Upload an image", type=["jpeg", "png", "jpg"])
-        if uploaded_file:
-            has_active_input = True
-            process_new_image(uploaded_file.getvalue())
-
-    if st.session_state.had_active_input and not has_active_input and st.session_state.image_data is not None:
-        clear_all_data()
-        st.rerun()
-
-    image = None
-    if st.session_state.image_data is not None:
-        image = Image.open(io.BytesIO(st.session_state.image_data))
-
-    if image:
-        st.image(image, caption="Input Image", width=300)
+        # Normal detection page
+        st.subheader("Consigner Information")
         
-        if not st.session_state.detection_complete:
-            rgb_image = image.convert('RGB')
-            img_array = np.array(rgb_image)
-            model = YOLO("yolov8m.pt")
-
-            with st.spinner("Detecting items..."):
-                results = model(img_array, conf=0.2)[0]
-            
-            boxes = results.boxes.xyxy if results.boxes else []
-            
-            st.session_state.boxes_data = [list(map(int, box)) for box in boxes]
-            st.session_state.num_items = len(boxes)
-            st.session_state.item_images = {}  # Store individual item images
-            
-            # Store cropped images from detection
-            rgb_image = image.convert('RGB')
-            img_array = np.array(rgb_image)
-            for i, box in enumerate(boxes):
-                x1, y1, x2, y2 = map(int, box)
-                crop_array = img_array[y1:y2, x1:x2]
-                if crop_array.size > 0:
-                    crop_pil = Image.fromarray(crop_array)
-                    img_byte_arr = io.BytesIO()
-                    crop_pil.save(img_byte_arr, format='PNG')
-                    st.session_state.item_images[i] = img_byte_arr.getvalue()
-            
-            st.session_state.detection_complete = True
-            st.rerun()
+        default_index = 0 if get_form_value('consigner_type_selection', "New Consigner") == "New Consigner" else 1
         
-        # Show detected items
-        st.subheader(f"Detected {len(st.session_state.boxes_data)} items")
+        consigner_type = st.radio(
+            "Consigner Type:",
+            ["New Consigner", "Existing Consigner"],
+            horizontal=True,
+            index=default_index,
+            key="consigner_type_radio"
+        )
         
-        if len(st.session_state.boxes_data) == 0:
-            st.warning("No items auto-detected. You can add items manually below.")
+        st.session_state.consigner_type_selection = consigner_type
         
-        # Display all items (detected + manually added)
-        for i in range(st.session_state.num_items):
-            with st.container():
-                col1, col2 = st.columns([1, 2])
-                
-                with col1:
-                    # Check if we have an image for this item
-                    if i in st.session_state.get('item_images', {}):
-                        item_image = Image.open(io.BytesIO(st.session_state.item_images[i]))
-                        st.image(item_image, caption=f"Item {i+1}", width=180)
-                    else:
-                        st.info(f"📦 Item {i+1}")
-                        st.caption("No image")
+        if consigner_type == "New Consigner":
+            st.session_state.is_new_consigner = True
+            st.session_state.starting_item_number = 0
+            st.session_state.consigner_search_result = None
+            st.session_state.searched_account_number = ""
+        else:
+            st.session_state.is_new_consigner = False
+            
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                account_search = st.text_input(
+                    "Account Number:",
+                    value=get_form_value('searched_account_number', ''),
+                    placeholder="Enter account number (e.g., 6732)",
+                    key="account_search_input"
+                )
+            with col2:
+                st.write("")
+                st.write("")
+                search_clicked = st.button("Search", use_container_width=True)
+            
+            if search_clicked and account_search:
+                with st.spinner(f"Searching for account {account_search}..."):
+                    result, error = search_consigner_by_account(account_search)
                     
-                    # Option to replace/add image for this item
-                    with st.expander("Change image"):
-                        img_source = st.radio(
-                            "Source:",
-                            ["Upload", "Camera"],
-                            key=f"img_source_{i}",
+                    if error:
+                        st.error(error)
+                        st.session_state.consigner_search_result = None
+                    else:
+                        st.session_state.consigner_search_result = result
+                        st.session_state.searched_account_number = account_search
+                        st.session_state.starting_item_number = result['next_item_number']
+            
+            if st.session_state.consigner_search_result:
+                result = st.session_state.consigner_search_result
+                
+                st.success(f"✓ Found account {result['account_number']}")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Items on File", result['total_items'])
+                with col2:
+                    st.metric("Highest Item #", result['highest_item_number'])
+                with col3:
+                    st.metric("Next Item # Starts At", result['next_item_number'])
+                
+                with st.expander("View Recent Items"):
+                    recent_items = result['items'][-10:]
+                    for item in reversed(recent_items):
+                        st.write(f"**#{item['item_number']}**: {item['title'][:50]} - ${item['price']} (Qty: {item['qty']})")
+                
+                st.session_state.starting_item_number = result['next_item_number']
+            
+            elif account_search and not search_clicked:
+                saved_account = get_form_value('searched_account_number', '')
+                if saved_account and saved_account == account_search:
+                    st.session_state.starting_item_number = get_form_value('starting_item_number', 0)
+                    st.info(f"Using previously found data. Next item starts at #{st.session_state.starting_item_number}")
+        
+        st.divider()
+        
+        # Item Detection Section
+        st.subheader("Item Detection")
+        
+        # Only show uploader if we don't have detection results yet
+        if not st.session_state.detection_complete:
+            uploaded_file = st.file_uploader(
+                "Upload or take a photo of items",
+                type=["jpeg", "png", "jpg"],
+                key="main_image_upload"
+            )
+
+            if uploaded_file:
+                process_new_image(uploaded_file.getvalue())
+                st.session_state.had_active_input = True
+            
+            image = None
+            if st.session_state.image_data is not None:
+                image = Image.open(io.BytesIO(st.session_state.image_data))
+
+            if image:
+                st.image(image, caption="Input Image", width=300)
+                
+                rgb_image = image.convert('RGB')
+                img_array = np.array(rgb_image)
+                
+                # Use cached model
+                model = load_model()
+
+                with st.spinner("Detecting items..."):
+                    results = model(img_array, conf=0.2)[0]
+                
+                boxes = results.boxes.xyxy if results.boxes else []
+                
+                st.session_state.boxes_data = [list(map(int, box)) for box in boxes]
+                st.session_state.num_items = len(boxes)
+                st.session_state.item_images = {}
+                
+                # Store cropped images from detection
+                for i, box in enumerate(boxes):
+                    x1, y1, x2, y2 = map(int, box)
+                    crop_array = img_array[y1:y2, x1:x2]
+                    if crop_array.size > 0:
+                        crop_pil = Image.fromarray(crop_array)
+                        img_byte_arr = io.BytesIO()
+                        crop_pil.save(img_byte_arr, format='PNG')
+                        st.session_state.item_images[i] = img_byte_arr.getvalue()
+                
+                st.session_state.detection_complete = True
+                st.rerun()
+        
+        else:
+            # Detection already complete - show results
+            
+            # Show the original image with option to start over
+            if st.session_state.image_data:
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    image = Image.open(io.BytesIO(st.session_state.image_data))
+                    st.image(image, caption="Input Image", width=300)
+                with col2:
+                    if st.button("Reset", use_container_width=True):
+                        clear_all_data()
+                        st.rerun()
+            
+            # Show detected items
+            st.subheader(f"Detected {len(st.session_state.boxes_data)} items")
+            
+            if len(st.session_state.boxes_data) == 0 and st.session_state.num_items == 0:
+                st.warning("No items auto-detected. Add items manually below.")
+            
+            # Display all items
+            for i in range(st.session_state.num_items):
+                with st.container():
+                    col1, col2 = st.columns([1, 2])
+                    
+                    with col1:
+                        if i in st.session_state.get('item_images', {}):
+                            item_image = Image.open(io.BytesIO(st.session_state.item_images[i]))
+                            st.image(item_image, caption=f"Item {i+1}", width=180)
+                            
+                            if st.button("Change image", key=f"change_photo_{i}", use_container_width=True):
+                                st.session_state.adding_photo_for_item = i
+                                st.rerun()
+                        else:
+                            st.markdown(f"**Item {i+1}**")
+                            if st.button("Add Photo", key=f"add_photo_{i}", type="primary", use_container_width=True):
+                                st.session_state.adding_photo_for_item = i
+                                st.rerun()
+                        
+                        st.radio(
+                            "Status",
+                            ["Accept", "Reject"],
+                            key=f"status_{i}",
+                            index=0 if get_form_value(f"status_{i}", "Accept") == "Accept" else 1,
                             horizontal=True
                         )
-                        
-                        if img_source == "Camera":
-                            new_img = st.camera_input("Take photo", key=f"camera_{i}")
-                        else:
-                            new_img = st.file_uploader("Upload", type=["jpeg", "png", "jpg"], key=f"upload_{i}")
-                        
-                        if new_img:
-                            # Store the new image
-                            if 'item_images' not in st.session_state:
-                                st.session_state.item_images = {}
-                            st.session_state.item_images[i] = new_img.getvalue()
-                            st.success("Image updated!")
-                            st.rerun()
                     
-                    st.radio(
-                        "Status",
-                        ["Accept", "Reject"],
-                        key=f"status_{i}",
-                        index=0 if get_form_value(f"status_{i}", "Accept") == "Accept" else 1,
-                        horizontal=True
-                    )
-                
-                with col2:
-                    st.text_input("Item name", key=f"name_{i}", value=get_form_value(f"name_{i}", ""))
-                    st.text_area("Notes", key=f"notes_{i}", value=get_form_value(f"notes_{i}", ""))
-                    st.number_input("Price ($)", min_value=0.0, step=0.01, key=f"price_{i}", value=get_form_value(f"price_{i}", 0.0))
-                
-                st.divider()
-        
-        # Add more items button
-        st.markdown("---")
-        st.markdown("**➕ Add More Items**")
-        
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            if st.button("Add item with photo", use_container_width=True):
-                new_index = st.session_state.num_items
-                st.session_state.num_items += 1
-                st.rerun()
-        
-        with col2:
-            if st.button("Add item without photo", use_container_width=True):
-                new_index = st.session_state.num_items
-                st.session_state.num_items += 1
-                st.rerun()
-        
-        # Remove last item button (if more than 1 item)
-        if st.session_state.num_items > 1:
-            if st.button("Remove last item"):
-                last_index = st.session_state.num_items - 1
-                # Clean up the removed item's data
-                if last_index in st.session_state.get('item_images', {}):
-                    del st.session_state.item_images[last_index]
-                for key in [f"status_{last_index}", f"name_{last_index}", f"notes_{last_index}", f"price_{last_index}"]:
-                    if key in st.session_state:
-                        del st.session_state[key]
-                    if key in st.session_state.form_values:
-                        del st.session_state.form_values[key]
-                st.session_state.num_items -= 1
-                st.rerun()
-        
-        st.markdown("---")
-        
-        if st.button("Create Form", type="primary", use_container_width=True):
-            save_form_values()
-            st.session_state.show_form = True
-            st.rerun()
+                    with col2:
+                        st.text_input("Item name", key=f"name_{i}", value=get_form_value(f"name_{i}", ""))
+                        st.text_area("Notes", key=f"notes_{i}", value=get_form_value(f"notes_{i}", ""))
+                        st.number_input("Price ($)", min_value=0.0, step=0.01, key=f"price_{i}", value=get_form_value(f"price_{i}", 0.0))
+                    
+                    st.divider()
+            
+            # Add/Remove items section
+            st.markdown("### Manage Items")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                if st.button("➕ Add Item", use_container_width=True, type="primary"):
+                    new_index = st.session_state.num_items
+                    st.session_state.num_items += 1
+                    st.session_state.adding_photo_for_item = new_index
+                    st.rerun()
+            
+            with col2:
+                if st.button("➕ Add (No Photo)", use_container_width=True):
+                    st.session_state.num_items += 1
+                    st.rerun()
+            
+            with col3:
+                if st.session_state.num_items > 0:
+                    if st.button("Remove Last item", use_container_width=True):
+                        last_index = st.session_state.num_items - 1
+                        if last_index in st.session_state.get('item_images', {}):
+                            del st.session_state.item_images[last_index]
+                        for key in [f"status_{last_index}", f"name_{last_index}", f"notes_{last_index}", f"price_{last_index}"]:
+                            if key in st.session_state:
+                                del st.session_state[key]
+                            if key in st.session_state.form_values:
+                                del st.session_state.form_values[key]
+                        st.session_state.num_items -= 1
+                        st.rerun()
+            
+            st.markdown("---")
+            
+            if st.session_state.num_items > 0:
+                if st.button("Create Form", type="primary", use_container_width=True):
+                    save_form_values()
+                    st.session_state.show_form = True
+                    st.rerun()
