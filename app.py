@@ -500,7 +500,6 @@ else:
     # Consigner type selection
     st.subheader("Consigner Information")
     
-    # Restore consigner type from form_values if coming back from form
     default_index = 0 if get_form_value('consigner_type_selection', "New Consigner") == "New Consigner" else 1
     
     consigner_type = st.radio(
@@ -521,7 +520,6 @@ else:
     else:
         st.session_state.is_new_consigner = False
         
-        # Account number search
         col1, col2 = st.columns([3, 1])
         with col1:
             account_search = st.text_input(
@@ -531,11 +529,10 @@ else:
                 key="account_search_input"
             )
         with col2:
-            st.write("")  # Spacing
-            st.write("")  # Spacing
+            st.write("")
+            st.write("")
             search_clicked = st.button("🔍 Search", use_container_width=True)
         
-        # Perform search
         if search_clicked and account_search:
             with st.spinner(f"Searching for account {account_search}..."):
                 result, error = search_consigner_by_account(account_search)
@@ -548,7 +545,6 @@ else:
                     st.session_state.searched_account_number = account_search
                     st.session_state.starting_item_number = result['next_item_number']
         
-        # Display search results
         if st.session_state.consigner_search_result:
             result = st.session_state.consigner_search_result
             
@@ -562,16 +558,14 @@ else:
             with col3:
                 st.metric("Next Item # Starts At", result['next_item_number'])
             
-            # Show recent items (collapsible)
             with st.expander("View Recent Items"):
-                recent_items = result['items'][-10:]  # Last 10 items
+                recent_items = result['items'][-10:]
                 for item in reversed(recent_items):
                     st.write(f"**#{item['item_number']}**: {item['title'][:50]} - ${item['price']} (Qty: {item['qty']})")
             
             st.session_state.starting_item_number = result['next_item_number']
         
         elif account_search and not search_clicked:
-            # Restore previous search if coming back from form
             saved_account = get_form_value('searched_account_number', '')
             if saved_account and saved_account == account_search:
                 st.session_state.starting_item_number = get_form_value('starting_item_number', 0)
@@ -579,7 +573,7 @@ else:
     
     st.divider()
     
-    # Image input section
+    # Item Detection Section
     st.subheader("Item Detection")
     
     input_mode = st.radio(
@@ -597,7 +591,7 @@ else:
             has_active_input = True
             process_new_image(camera_image.getvalue())
     else:
-        uploaded_file = st.file_uploader("Upload an image", type=["jpeg", "png"])
+        uploaded_file = st.file_uploader("Upload an image", type=["jpeg", "png", "jpg"])
         if uploaded_file:
             has_active_input = True
             process_new_image(uploaded_file.getvalue())
@@ -611,7 +605,7 @@ else:
         image = Image.open(io.BytesIO(st.session_state.image_data))
 
     if image:
-        st.image(image, caption="Input Image", width=150)
+        st.image(image, caption="Input Image", width=300)
         
         if not st.session_state.detection_complete:
             rgb_image = image.convert('RGB')
@@ -619,35 +613,71 @@ else:
             model = YOLO("yolov8m.pt")
 
             with st.spinner("Detecting items..."):
-                results = model(img_array)[0]
+                results = model(img_array, conf=0.2)[0]
             
             boxes = results.boxes.xyxy if results.boxes else []
             
             st.session_state.boxes_data = [list(map(int, box)) for box in boxes]
             st.session_state.num_items = len(boxes)
+            st.session_state.item_images = {}  # Store individual item images
+            
+            # Store cropped images from detection
+            rgb_image = image.convert('RGB')
+            img_array = np.array(rgb_image)
+            for i, box in enumerate(boxes):
+                x1, y1, x2, y2 = map(int, box)
+                crop_array = img_array[y1:y2, x1:x2]
+                if crop_array.size > 0:
+                    crop_pil = Image.fromarray(crop_array)
+                    img_byte_arr = io.BytesIO()
+                    crop_pil.save(img_byte_arr, format='PNG')
+                    st.session_state.item_images[i] = img_byte_arr.getvalue()
+            
             st.session_state.detection_complete = True
             st.rerun()
         
-        boxes = st.session_state.boxes_data
-        st.subheader(f"Detected {len(boxes)} items")
+        # Show detected items
+        st.subheader(f"Detected {len(st.session_state.boxes_data)} items")
         
-        if len(boxes) == 0:
-            st.warning("No items detected. Try uploading a different image.")
-        else:
-            rgb_image = image.convert('RGB')
-            img_array = np.array(rgb_image)
-
-            for i, box in enumerate(boxes):
-                x1, y1, x2, y2 = box
-                crop_array = img_array[y1:y2, x1:x2]
-                if crop_array.size == 0:
-                    continue
-                crop_pil = Image.fromarray(crop_array)
-                
+        if len(st.session_state.boxes_data) == 0:
+            st.warning("No items auto-detected. You can add items manually below.")
+        
+        # Display all items (detected + manually added)
+        for i in range(st.session_state.num_items):
+            with st.container():
                 col1, col2 = st.columns([1, 2])
                 
                 with col1:
-                    st.image(crop_pil, caption=f"Item {i+1}", width=180)
+                    # Check if we have an image for this item
+                    if i in st.session_state.get('item_images', {}):
+                        item_image = Image.open(io.BytesIO(st.session_state.item_images[i]))
+                        st.image(item_image, caption=f"Item {i+1}", width=180)
+                    else:
+                        st.info(f"📦 Item {i+1}")
+                        st.caption("No image")
+                    
+                    # Option to replace/add image for this item
+                    with st.expander("Change image"):
+                        img_source = st.radio(
+                            "Source:",
+                            ["Upload", "Camera"],
+                            key=f"img_source_{i}",
+                            horizontal=True
+                        )
+                        
+                        if img_source == "Camera":
+                            new_img = st.camera_input("Take photo", key=f"camera_{i}")
+                        else:
+                            new_img = st.file_uploader("Upload", type=["jpeg", "png", "jpg"], key=f"upload_{i}")
+                        
+                        if new_img:
+                            # Store the new image
+                            if 'item_images' not in st.session_state:
+                                st.session_state.item_images = {}
+                            st.session_state.item_images[i] = new_img.getvalue()
+                            st.success("Image updated!")
+                            st.rerun()
+                    
                     st.radio(
                         "Status",
                         ["Accept", "Reject"],
@@ -662,8 +692,42 @@ else:
                     st.number_input("Price ($)", min_value=0.0, step=0.01, key=f"price_{i}", value=get_form_value(f"price_{i}", 0.0))
                 
                 st.divider()
-            
-            if st.button("Create Form"):
-                save_form_values()
-                st.session_state.show_form = True
+        
+        # Add more items button
+        st.markdown("---")
+        st.markdown("**➕ Add More Items**")
+        
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("Add item with photo", use_container_width=True):
+                new_index = st.session_state.num_items
+                st.session_state.num_items += 1
                 st.rerun()
+        
+        with col2:
+            if st.button("Add item without photo", use_container_width=True):
+                new_index = st.session_state.num_items
+                st.session_state.num_items += 1
+                st.rerun()
+        
+        # Remove last item button (if more than 1 item)
+        if st.session_state.num_items > 1:
+            if st.button("Remove last item"):
+                last_index = st.session_state.num_items - 1
+                # Clean up the removed item's data
+                if last_index in st.session_state.get('item_images', {}):
+                    del st.session_state.item_images[last_index]
+                for key in [f"status_{last_index}", f"name_{last_index}", f"notes_{last_index}", f"price_{last_index}"]:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                    if key in st.session_state.form_values:
+                        del st.session_state.form_values[key]
+                st.session_state.num_items -= 1
+                st.rerun()
+        
+        st.markdown("---")
+        
+        if st.button("Create Form", type="primary", use_container_width=True):
+            save_form_values()
+            st.session_state.show_form = True
+            st.rerun()
