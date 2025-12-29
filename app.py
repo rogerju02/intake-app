@@ -615,8 +615,8 @@ else:
         
         if not st.session_state.detection_complete:
             rgb_image = image.convert('RGB')
-            img_array = np.array(image)
-            model = YOLO("yolov8n.pt")
+            img_array = np.array(rgb_image)
+            model = YOLO("yolov8m.pt")
 
             with st.spinner("Detecting items..."):
                 results = model(img_array)[0]
@@ -634,7 +634,8 @@ else:
         if len(boxes) == 0:
             st.warning("No items detected. Try uploading a different image.")
         else:
-            img_array = np.array(image)
+            rgb_image = image.convert('RGB')
+            img_array = np.array(rgb_image)
 
             for i, box in enumerate(boxes):
                 x1, y1, x2, y2 = box
