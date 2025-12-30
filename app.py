@@ -1,4 +1,6 @@
 import streamlit as st
+import streamlit.components.v1 as components
+import base64
 from PIL import Image 
 import numpy as np
 from ultralytics import YOLO
@@ -189,7 +191,14 @@ def get_accepted_items_count():
 def generate_pdf(customer_name, customer_address, account_number, phone_number, starting_item_num, is_new_consigner):
     """Generate a PDF receipt matching the consignment form style"""
     buffer = io.BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, topMargin=0.5*inch, bottomMargin=0.5*inch)
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        topMargin=1.5*inch,
+        bottomMargin=1.5*inch,
+        leftMargin=1.5*inch,
+        rightMargin=1.5*inch
+    )
     
     styles = getSampleStyleSheet()
     
@@ -254,6 +263,7 @@ def generate_pdf(customer_name, customer_address, account_number, phone_number, 
         "Page #: 1"
     ]]
     info_table = Table(info_data, colWidths=[1.8*inch, 1.8*inch, 1.8*inch, 1.1*inch])
+    info_table.hAlign = "CENTER"   
     info_table.setStyle(TableStyle([
         ('FONTSIZE', (0, 0), (-1, -1), 9),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
@@ -328,7 +338,7 @@ def generate_pdf(customer_name, customer_address, account_number, phone_number, 
         ('LEFTPADDING', (0, 0), (-1, -1), 4),
         ('RIGHTPADDING', (0, 0), (-1, -1), 4),
     ]
-    
+    items_table.hAlign = "CENTER"   
     items_table.setStyle(TableStyle(table_style))
     story.append(items_table)
     
@@ -346,6 +356,7 @@ def generate_pdf(customer_name, customer_address, account_number, phone_number, 
         summary_data,
         colWidths=[1.25*inch, 2.7*inch, 1.4*inch, 1.25*inch]
     )
+    summary_table.hAlign = "CENTER"
     
     summary_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, -1), colors.Color(0.9, 0.9, 0.9)),
@@ -367,9 +378,206 @@ def generate_pdf(customer_name, customer_address, account_number, phone_number, 
     buffer.seek(0)
     return buffer
 
+def generate_photo_sheet(account_number, starting_item_num):
+    """Generate a PDF with item photos"""
+    from reportlab.platypus import Image as RLImage
+    
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        topMargin=1.5*inch,
+        bottomMargin=1.5*inch,
+        leftMargin=1.5*inch,
+        rightMargin=1.5*inch
+    )
+    
+    styles = getSampleStyleSheet()
+    
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=16,
+        spaceAfter=2,
+        fontName='Helvetica-Bold'
+    )
+    
+    subtitle_style = ParagraphStyle(
+        'Subtitle',
+        parent=styles['Normal'],
+        fontSize=10,
+        textColor=colors.Color(0.4, 0.4, 0.4),
+        spaceAfter=20
+    )
+    
+    story = []
+    
+    # Header
+    story.append(Paragraph("Consigned By Design - Item Photos", title_style))
+    story.append(Paragraph(f"Account #: {account_number or 'N/A'} | Date: {datetime.now().strftime('%m/%d/%Y')}", subtitle_style))
+    
+    # Collect accepted items with photos
+    current_item_num = starting_item_num
+    items_with_photos = []
+    
+    for i in range(st.session_state.num_items):
+        if get_form_value(f"status_{i}", "Accept") == "Accept":
+            name = get_form_value(f"name_{i}", "") or f"Item {i+1}"
+            price = get_form_value(f'price_{i}', 0.0)
+            has_photo = i in st.session_state.get('item_images', {})
+            
+            items_with_photos.append({
+                'index': i,
+                'item_num': current_item_num,
+                'name': name,
+                'price': price,
+                'has_photo': has_photo
+            })
+            current_item_num += 1
+    
+    # Create 2-column grid of photos
+    row_data = []
+    current_row = []
+    
+    for item in items_with_photos:
+        # Create cell content
+        cell_content = []
+        
+        # Item header
+        cell_content.append(Paragraph(f"<b>#{item['item_num']}</b> - {item['name'][:30]}", styles['Normal']))
+        cell_content.append(Paragraph(f"${item['price']:.2f}", styles['Normal']))
+        
+        # Add image if available
+        if item['has_photo']:
+            img_bytes = st.session_state.item_images[item['index']]
+            img = Image.open(io.BytesIO(img_bytes))
+            
+            # Resize image to fit
+            max_size = (200, 200)
+            img.thumbnail(max_size, Image.Resampling.LANCZOS)
+            
+            # Save to bytes for reportlab
+            img_buffer = io.BytesIO()
+            img.save(img_buffer, format='PNG')
+            img_buffer.seek(0)
+            
+            rl_img = RLImage(img_buffer, width=2.5*inch, height=2.5*inch, kind='proportional')
+            cell_content.append(Spacer(1, 5))
+            cell_content.append(rl_img)
+        else:
+            cell_content.append(Spacer(1, 5))
+            cell_content.append(Paragraph("<i>No photo</i>", styles['Normal']))
+        
+        current_row.append(cell_content)
+        
+        # Two items per row
+        if len(current_row) == 2:
+            row_data.append(current_row)
+            current_row = []
+    
+    # Add remaining item if odd number
+    if current_row:
+        current_row.append([])  # Empty cell
+        row_data.append(current_row)
+    
+    # Create table
+    if row_data:
+        photo_table = Table(row_data, colWidths=[3.5*inch, 3.5*inch])
+        photo_table.hAlign = "CENTER"
+        photo_table.setStyle(TableStyle([
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('TOPPADDING', (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 10),
+            ('LEFTPADDING', (0, 0), (-1, -1), 10),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.Color(0.8, 0.8, 0.8)),
+        ]))
+        story.append(photo_table)
+    else:
+        story.append(Paragraph("No items to display.", styles['Normal']))
+    
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+def get_pdf_print_button(pdf_buffer, button_label, key):
+    pdf_base64 = base64.b64encode(pdf_buffer.getvalue()).decode("utf-8")
+
+    html = f"""
+    <button id="btn_{key}" style="
+        background-color: #f0f2f6;
+        border: 1px solid #ccc;
+        border-radius: 5px;
+        padding: 10px 20px;
+        font-size: 16px;
+        cursor: pointer;
+        width: 100%;
+        margin-top: 5px;
+    ">{button_label}</button>
+
+    <script>
+    (function() {{
+      const b64 = "{pdf_base64}";
+      const btn = document.getElementById("btn_{key}");
+
+      btn.addEventListener("click", () => {{
+        const w = window.open("", "_blank");
+        if (!w) {{
+          alert("Pop-up blocked. Please allow pop-ups for this site to print.");
+          return;
+        }}
+
+        // Build a tiny HTML wrapper that hosts the PDF in an iframe
+        w.document.open();
+        w.document.write(`
+          <!doctype html>
+          <html>
+            <head>
+              <title>Print</title>
+              <style>
+                html, body {{ height: 100%; margin: 0; }}
+                iframe {{ width: 100%; height: 100%; border: 0; }}
+              </style>
+            </head>
+            <body>
+              <iframe id="pdfFrame" src="data:application/pdf;base64,${{b64}}"></iframe>
+              <script>
+                const f = document.getElementById("pdfFrame");
+
+                // Try to print when the iframe reports loaded
+                f.onload = () => {{
+                  setTimeout(() => {{
+                    try {{
+                      f.contentWindow.focus();
+                      f.contentWindow.print();
+                    }} catch (e) {{
+                      // If cross/sandbox restrictions ever bite, user can still print manually
+                      window.print();
+                    }}
+                  }}, 800);
+                }};
+
+                // Fallback if onload never fires (some PDF viewers)
+                setTimeout(() => {{
+                  try {{
+                    f.contentWindow.focus();
+                    f.contentWindow.print();
+                  }} catch (e) {{}}
+                }}, 1500);
+              <\/script>
+            </body>
+          </html>
+        `);
+        w.document.close();
+      }});
+    }})();
+    </script>
+    """
+    return html
+
 # Form Creation Page
 if st.session_state.show_form:
-    # Company Header
     st.markdown("""
     <div style="margin-bottom: 20px;">
         <h2 style="margin-bottom: 5px;">Consigned By Design</h2>
@@ -381,11 +589,9 @@ if st.session_state.show_form:
     
     st.markdown("### Item List")
     
-    # Get values from form_values (persisted)
     is_new_consigner = get_form_value('is_new_consigner', True)
     starting_item_num = get_form_value('starting_item_number', 0)
     
-    # Customer info section - only show for new consigners
     if is_new_consigner:
         customer_name = st.text_input("Customer Name", value=get_form_value("customer_name", ""))
         customer_address = st.text_area("Customer Address", value=get_form_value("customer_address", ""), height=100)
@@ -403,12 +609,10 @@ if st.session_state.show_form:
         account_number = get_form_value("searched_account_number", "")
         phone_number = get_form_value("phone_number", "")
     
-    # Info row
     st.markdown(f"**Today's Date:** {datetime.now().strftime('%m/%d/%Y')} | **Account #:** {account_number or 'N/A'} | **Phone:** {phone_number or 'N/A'}")
     
     st.divider()
     
-    # Items table - mobile friendly card view
     total_price = 0.0
     item_count = 0
     current_item_num = starting_item_num
@@ -421,24 +625,32 @@ if st.session_state.show_form:
             name = get_form_value(f"name_{i}", "") or ""
             notes = get_form_value(f"notes_{i}", "")
             
-            # Mobile-friendly item card
             st.markdown(f"""
-                <div style="background: #f8f8f8; padding: 10px; border-radius: 5px; margin-bottom: 10px;">
-                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                        <strong>#{current_item_num}</strong>
-                        <strong>${price:.2f}</strong>
-                    </div>
-                    <div style="margin-top: 5px;">{name}</div>
-                    {f'<div style="color: #666; font-size: 0.9em;">{notes}</div>' if notes else ''}
+            <div style="background: #f8f8f8; padding: 10px; border-radius: 5px; margin-bottom: 10px;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <strong>#{current_item_num}</strong>
+                    <strong>${price:.2f}</strong>
                 </div>
-                """, unsafe_allow_html=True)
-
+                <div style="margin-top: 5px;">{name}</div>
+                {f'<div style="color: #666; font-size: 0.9em;">{notes}</div>' if notes else ''}
+            </div>
+            """, unsafe_allow_html=True)
+            
             current_item_num += 1
     
+    st.markdown(f"""
+    <div style="background: #e0e0e0; padding: 10px; border-radius: 5px; margin-top: 10px;">
+        <div style="display: flex; justify-content: space-between;">
+            <span><strong>{item_count} Unique Items</strong></span>
+            <span><strong>${total_price:.2f}</strong></span>
+        </div>
+        <div style="color: #666;">Quantity on Hand: {item_count}</div>
+    </div>
+    """, unsafe_allow_html=True)
     
     st.divider()
     
-    # Action buttons
+    # Back button
     if st.button("← Back to Detection", use_container_width=True):
         st.session_state.form_values["customer_name"] = customer_name
         st.session_state.form_values["customer_address"] = customer_address
@@ -448,6 +660,9 @@ if st.session_state.show_form:
         st.session_state.had_active_input = False
         st.rerun()
     
+    st.markdown("### Receipt")
+    
+    # Generate Receipt PDF
     pdf_buffer = generate_pdf(
         customer_name, 
         customer_address, 
@@ -456,14 +671,40 @@ if st.session_state.show_form:
         starting_item_num,
         is_new_consigner
     )
-    st.download_button(
-        label="📥 Download PDF",
-        data=pdf_buffer,
-        file_name=f"intake_form_{account_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-        mime="application/pdf",
-        use_container_width=True,
-        type="primary"
-    )
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label="📥 Download",
+            data=pdf_buffer,
+            file_name=f"intake_form_{account_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            mime="application/pdf",
+            use_container_width=True,
+            type="primary"
+        )
+    with col2:
+        # Reset buffer position for print
+        pdf_buffer.seek(0)
+        components.html(get_pdf_print_button(pdf_buffer, "🖨️ Print", "receipt"), height=50)
+    
+    st.markdown("### Photo Sheet")
+    
+    # Generate Photo Sheet PDF
+    photo_buffer = generate_photo_sheet(account_number, starting_item_num)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label="📥 Download",
+            data=photo_buffer,
+            file_name=f"photos_{account_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+    with col2:
+        # Reset buffer position for print
+        photo_buffer.seek(0)
+        components.html(get_pdf_print_button(photo_buffer, "🖨️ Print", "photos"), height=50)
 # Detection page
 else:
     # Check if we're in "add photo" mode for a specific item
@@ -661,11 +902,13 @@ else:
                             st.image(item_image, caption=f"Item {i+1}", width=180)
                             
                             if st.button("Change image", key=f"change_photo_{i}", use_container_width=True):
+                                save_form_values() 
                                 st.session_state.adding_photo_for_item = i
                                 st.rerun()
                         else:
                             st.markdown(f"**Item {i+1}**")
                             if st.button("Add Photo", key=f"add_photo_{i}", type="primary", use_container_width=True):
+                                save_form_values()
                                 st.session_state.adding_photo_for_item = i
                                 st.rerun()
                         
@@ -691,6 +934,7 @@ else:
             
             with col1:
                 if st.button("➕ Add Item", use_container_width=True, type="primary"):
+                    save_form_values()
                     new_index = st.session_state.num_items
                     st.session_state.num_items += 1
                     st.session_state.adding_photo_for_item = new_index
@@ -698,12 +942,14 @@ else:
             
             with col2:
                 if st.button("➕ Add (No Photo)", use_container_width=True):
+                    save_form_values()
                     st.session_state.num_items += 1
                     st.rerun()
             
             with col3:
                 if st.session_state.num_items > 0:
                     if st.button("Remove Last item", use_container_width=True):
+                        save_form_values()
                         last_index = st.session_state.num_items - 1
                         if last_index in st.session_state.get('item_images', {}):
                             del st.session_state.item_images[last_index]
