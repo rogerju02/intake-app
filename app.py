@@ -500,82 +500,85 @@ def generate_photo_sheet(account_number, starting_item_num):
     doc.build(story)
     buffer.seek(0)
     return buffer
-
 def get_pdf_print_button(pdf_buffer, button_label, key):
     pdf_base64 = base64.b64encode(pdf_buffer.getvalue()).decode("utf-8")
 
-    html = f"""
-    <button id="btn_{key}" style="
-        background-color: #f0f2f6;
-        border: 1px solid #ccc;
-        border-radius: 5px;
-        padding: 10px 20px;
-        font-size: 16px;
-        cursor: pointer;
-        width: 100%;
-        margin-top: 5px;
-    ">{button_label}</button>
-
-    <script>
-    (function() {{
-      const b64 = "{pdf_base64}";
-      const btn = document.getElementById("btn_{key}");
-
-      btn.addEventListener("click", () => {{
-        const w = window.open("", "_blank");
-        if (!w) {{
-          alert("Pop-up blocked. Please allow pop-ups for this site to print.");
-          return;
+    return f"""
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <style>
+        html, body {{
+          margin: 0 !important;
+          padding: 0 !important;
+          height: 100%;
+          background: transparent;
+          overflow: hidden;
         }}
+        .wrap {{
+          height: 42px;              
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }}
+        button {{
+          width: 100%;
+          height: 42px;
+          padding: 0 1rem;
+          font-size: 14px;
+          font-weight: 400;
+          border-radius: 0.5rem;
+          border: 1px solid rgba(49, 51, 63, 0.2);
+          background: white;
+          color: rgb(49, 51, 63);
+          cursor: pointer;
+          box-sizing: border-box;
+          margin: 0;
+          line-height: 1;            
+        }}
+        button:hover {{
+          background: #F0F2F6;
+        }}
+        button:active {{
+          transform: translateY(1px);
+        }}
+      </style>
+    </head>
+    <body>
+      <div class="wrap">
+        <button id="btn_{key}">{button_label}</button>
+      </div>
 
-        // Build a tiny HTML wrapper that hosts the PDF in an iframe
-        w.document.open();
-        w.document.write(`
-          <!doctype html>
-          <html>
-            <head>
-              <title>Print</title>
-              <style>
-                html, body {{ height: 100%; margin: 0; }}
-                iframe {{ width: 100%; height: 100%; border: 0; }}
-              </style>
-            </head>
-            <body>
-              <iframe id="pdfFrame" src="data:application/pdf;base64,${{b64}}"></iframe>
-              <script>
-                const f = document.getElementById("pdfFrame");
+      <script>
+        (function() {{
+          const b64 = "{pdf_base64}";
+          const btn = document.getElementById("btn_{key}");
 
-                // Try to print when the iframe reports loaded
-                f.onload = () => {{
-                  setTimeout(() => {{
-                    try {{
-                      f.contentWindow.focus();
-                      f.contentWindow.print();
-                    }} catch (e) {{
-                      // If cross/sandbox restrictions ever bite, user can still print manually
-                      window.print();
-                    }}
-                  }}, 800);
-                }};
+          btn.addEventListener("click", () => {{
+            const byteCharacters = atob(b64);
+            const byteNumbers = new Array(byteCharacters.length);
+            for (let i = 0; i < byteCharacters.length; i++) {{
+              byteNumbers[i] = byteCharacters.charCodeAt(i);
+            }}
+            const byteArray = new Uint8Array(byteNumbers);
+            const blob = new Blob([byteArray], {{ type: "application/pdf" }});
+            const url = URL.createObjectURL(blob);
 
-                // Fallback if onload never fires (some PDF viewers)
-                setTimeout(() => {{
-                  try {{
-                    f.contentWindow.focus();
-                    f.contentWindow.print();
-                  }} catch (e) {{}}
-                }}, 1500);
-              <\/script>
-            </body>
-          </html>
-        `);
-        w.document.close();
-      }});
-    }})();
-    </script>
+            const w = window.open(url, "_blank");
+            if (!w) {{
+              alert("Pop-up blocked. Please allow pop-ups to print.");
+              return;
+            }}
+
+            setTimeout(() => {{
+              try {{ w.focus(); w.print(); }} catch(e) {{}}
+            }}, 700);
+          }});
+        }})();
+      </script>
+    </body>
+    </html>
     """
-    return html
-
 # Form Creation Page
 if st.session_state.show_form:
     st.markdown("""
@@ -675,17 +678,15 @@ if st.session_state.show_form:
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
-            label="📥 Download",
+            label="Download",
             data=pdf_buffer,
             file_name=f"intake_form_{account_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
             mime="application/pdf",
-            use_container_width=True,
-            type="primary"
+            use_container_width=True
         )
     with col2:
-        # Reset buffer position for print
         pdf_buffer.seek(0)
-        components.html(get_pdf_print_button(pdf_buffer, "🖨️ Print", "receipt"), height=50)
+        components.html(get_pdf_print_button(pdf_buffer, "Print", "receipt"), height=50)
     
     st.markdown("### Photo Sheet")
     
@@ -695,16 +696,15 @@ if st.session_state.show_form:
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
-            label="📥 Download",
+            label="Download",
             data=photo_buffer,
             file_name=f"photos_{account_number}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf",
             mime="application/pdf",
             use_container_width=True
         )
     with col2:
-        # Reset buffer position for print
         photo_buffer.seek(0)
-        components.html(get_pdf_print_button(photo_buffer, "🖨️ Print", "photos"), height=50)
+        components.html(get_pdf_print_button(photo_buffer, "Print", "photos"), height=50)
 # Detection page
 else:
     # Check if we're in "add photo" mode for a specific item
@@ -933,7 +933,7 @@ else:
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                if st.button("➕ Add Item", use_container_width=True, type="primary"):
+                if st.button("Add Item", use_container_width=True):
                     save_form_values()
                     new_index = st.session_state.num_items
                     st.session_state.num_items += 1
@@ -941,14 +941,14 @@ else:
                     st.rerun()
             
             with col2:
-                if st.button("➕ Add (No Photo)", use_container_width=True):
+                if st.button("Add (No Photo)", use_container_width=True):
                     save_form_values()
                     st.session_state.num_items += 1
                     st.rerun()
             
             with col3:
                 if st.session_state.num_items > 0:
-                    if st.button("Remove Last item", use_container_width=True):
+                    if st.button("Remove Last", use_container_width=True):
                         save_form_values()
                         last_index = st.session_state.num_items - 1
                         if last_index in st.session_state.get('item_images', {}):
@@ -964,7 +964,7 @@ else:
             st.markdown("---")
             
             if st.session_state.num_items > 0:
-                if st.button("Create Form", type="primary", use_container_width=True):
+                if st.button("Create Form", use_container_width=True):
                     save_form_values()
                     st.session_state.show_form = True
                     st.rerun()
