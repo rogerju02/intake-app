@@ -762,7 +762,7 @@ else:
         
         if consigner_type == "New Consigner":
             st.session_state.is_new_consigner = True
-            st.session_state.starting_item_number = 0
+            st.session_state.starting_item_number = 1
             st.session_state.consigner_search_result = None
             st.session_state.searched_account_number = ""
         else:
@@ -811,7 +811,7 @@ else:
                     for item in reversed(recent_items):
                         st.write(f"**#{item['item_number']}**: {item['title'][:50]} - ${item['price']} (Qty: {item['qty']})")
                 
-                st.session_state.starting_item_number = result['next_item_number']
+                st.session_state.starting_item_number = 1
             
             elif account_search and not search_clicked:
                 saved_account = get_form_value('searched_account_number', '')
