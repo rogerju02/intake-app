@@ -152,29 +152,45 @@ def init_database():
     """Initialize SQLite database for form drafts"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS form_drafts (
-            id TEXT PRIMARY KEY,
-            name TEXT,
-            app_mode TEXT,
-            form_data TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
+    
+    # Check if we need to migrate the schema
+    cursor.execute("PRAGMA table_info(form_drafts)")
+    columns = [col[1] for col in cursor.fetchall()]
+    
+    if not columns:
+        # Create new table with is_permanent column
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS form_drafts (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                app_mode TEXT,
+                form_data TEXT,
+                is_permanent INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+    elif 'is_permanent' not in columns:
+        # Add is_permanent column to existing table
+        try:
+            cursor.execute('ALTER TABLE form_drafts ADD COLUMN is_permanent INTEGER DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+    
     conn.commit()
     conn.close()
 
 def cleanup_old_drafts():
-    """Remove drafts older than DRAFT_EXPIRY_HOURS"""
+    """Remove temporary drafts older than DRAFT_EXPIRY_HOURS (keeps permanent ones)"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     expiry_time = datetime.now() - timedelta(hours=DRAFT_EXPIRY_HOURS)
-    cursor.execute('DELETE FROM form_drafts WHERE updated_at < ?', (expiry_time,))
+    # Only delete non-permanent drafts
+    cursor.execute('DELETE FROM form_drafts WHERE updated_at < ? AND (is_permanent = 0 OR is_permanent IS NULL)', (expiry_time,))
     conn.commit()
     conn.close()
 
-def save_draft(draft_id, name, app_mode, form_data):
+def save_draft(draft_id, name, app_mode, form_data, is_permanent=False):
     """Save or update a form draft"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -198,14 +214,15 @@ def save_draft(draft_id, name, app_mode, form_data):
     json_data = json.dumps(serializable_data)
     
     cursor.execute('''
-        INSERT INTO form_drafts (id, name, app_mode, form_data, updated_at)
-        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        INSERT INTO form_drafts (id, name, app_mode, form_data, is_permanent, updated_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
         ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             app_mode = excluded.app_mode,
             form_data = excluded.form_data,
+            is_permanent = excluded.is_permanent,
             updated_at = CURRENT_TIMESTAMP
-    ''', (draft_id, name, app_mode, json_data))
+    ''', (draft_id, name, app_mode, json_data, 1 if is_permanent else 0))
     conn.commit()
     conn.close()
 
@@ -213,7 +230,7 @@ def load_draft(draft_id):
     """Load a form draft by ID"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT form_data, app_mode FROM form_drafts WHERE id = ?', (draft_id,))
+    cursor.execute('SELECT form_data, app_mode, is_permanent FROM form_drafts WHERE id = ?', (draft_id,))
     result = cursor.fetchone()
     conn.close()
     
@@ -233,24 +250,42 @@ def load_draft(draft_id):
             if isinstance(form_data['image_data'], str):
                 form_data['image_data'] = base64.b64decode(form_data['image_data'])
         
-        return form_data, result[1]
-    return None, None
+        is_permanent = bool(result[2]) if result[2] is not None else False
+        return form_data, result[1], is_permanent
+    return None, None, False
 
 def get_all_drafts():
     """Get list of all saved drafts"""
     cleanup_old_drafts()  # Clean up on every list fetch
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT id, name, app_mode, created_at, updated_at FROM form_drafts ORDER BY updated_at DESC')
+    cursor.execute('SELECT id, name, app_mode, created_at, updated_at, is_permanent FROM form_drafts ORDER BY updated_at DESC')
     drafts = cursor.fetchall()
     conn.close()
     return drafts
+
+def get_most_recent_draft():
+    """Get the most recently updated draft"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT id, name, app_mode, updated_at FROM form_drafts ORDER BY updated_at DESC LIMIT 1')
+    result = cursor.fetchone()
+    conn.close()
+    return result
 
 def delete_draft(draft_id):
     """Delete a draft by ID"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('DELETE FROM form_drafts WHERE id = ?', (draft_id,))
+    conn.commit()
+    conn.close()
+
+def set_draft_permanent(draft_id, is_permanent):
+    """Set whether a draft is permanent"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE form_drafts SET is_permanent = ? WHERE id = ?', (1 if is_permanent else 0, draft_id))
     conn.commit()
     conn.close()
 
@@ -715,6 +750,9 @@ def init_session_state():
         # Draft management
         'current_draft_id': None,
         'show_drafts_panel': False,
+        'is_draft_permanent': False,
+        'session_recovered': False,
+        'last_auto_save': None,
         # Email import mode
         'gmail_authenticated': False,
         'email_search_results': None,
@@ -734,6 +772,62 @@ def init_session_state():
             st.session_state[key] = value
 
 init_session_state()
+
+# ============================================
+# URL-BASED SESSION RECOVERY
+# ============================================
+
+def check_and_recover_session():
+    """Check URL params for draft_id and auto-recover session"""
+    if st.session_state.session_recovered:
+        return False
+    
+    # Check for draft_id in URL
+    query_params = st.query_params
+    draft_id = query_params.get("draft")
+    
+    if draft_id:
+        # Try to load the draft
+        if restore_draft_to_session(draft_id):
+            st.session_state.session_recovered = True
+            return True
+    
+    return False
+
+def update_url_with_draft_id(draft_id):
+    """Update URL to include current draft ID for session recovery"""
+    if draft_id:
+        st.query_params["draft"] = draft_id
+    else:
+        # Clear draft param if no draft
+        if "draft" in st.query_params:
+            del st.query_params["draft"]
+
+def auto_save_draft():
+    """Auto-save current form state to database and update URL"""
+    if st.session_state.app_mode is None:
+        return None
+    
+    # Only auto-save if we have meaningful data
+    if st.session_state.num_items == 0 and not st.session_state.form_values.get('customer_name'):
+        return None
+    
+    # Generate draft ID if needed
+    if not st.session_state.current_draft_id:
+        st.session_state.current_draft_id = str(uuid.uuid4())[:8]
+    
+    # Save form values first
+    save_form_values()
+    
+    # Save to database
+    draft_id = save_current_form_to_draft()
+    
+    # Update URL for session recovery
+    update_url_with_draft_id(draft_id)
+    
+    st.session_state.last_auto_save = datetime.now()
+    
+    return draft_id
 
 # ============================================
 # UTILITY FUNCTIONS
@@ -765,6 +859,8 @@ def reset_to_mode_selection():
     st.session_state.manual_account_number = ""
     st.session_state.search_failed = False
     st.session_state.current_draft_id = None
+    st.session_state.is_draft_permanent = False
+    st.session_state.session_recovered = False
     # Reset email import state
     st.session_state.email_search_results = None
     st.session_state.email_recent_threads = None
@@ -777,6 +873,8 @@ def reset_to_mode_selection():
     # Reset field configuration to defaults
     st.session_state.enabled_fields = get_default_enabled_fields()
     st.session_state.show_field_config = False
+    # Clear URL params
+    update_url_with_draft_id(None)
 
 def save_form_values():
     for i in range(st.session_state.num_items):
@@ -857,7 +955,7 @@ def get_draft_display_name():
     
     return f"Draft {datetime.now().strftime('%m/%d %H:%M')}"
 
-def save_current_form_to_draft():
+def save_current_form_to_draft(make_permanent=None):
     """Save current form state to database"""
     if not st.session_state.current_draft_id:
         st.session_state.current_draft_id = str(uuid.uuid4())[:8]
@@ -881,17 +979,25 @@ def save_current_form_to_draft():
     
     name = get_draft_display_name()
     
+    # Determine permanence: use provided value, or keep current state
+    if make_permanent is not None:
+        is_permanent = make_permanent
+        st.session_state.is_draft_permanent = is_permanent
+    else:
+        is_permanent = st.session_state.is_draft_permanent
+    
     save_draft(
         st.session_state.current_draft_id,
         name,
         st.session_state.app_mode,
-        form_data
+        form_data,
+        is_permanent
     )
     return st.session_state.current_draft_id
 
 def restore_draft_to_session(draft_id):
     """Restore a draft from database to session state"""
-    form_data, app_mode = load_draft(draft_id)
+    form_data, app_mode, is_permanent = load_draft(draft_id)
     if form_data:
         st.session_state.app_mode = app_mode
         st.session_state.form_values = form_data.get('form_values', {})
@@ -908,7 +1014,10 @@ def restore_draft_to_session(draft_id):
         st.session_state.search_failed = form_data.get('search_failed', False)
         st.session_state.enabled_fields = form_data.get('enabled_fields', get_default_enabled_fields())
         st.session_state.current_draft_id = draft_id
+        st.session_state.is_draft_permanent = is_permanent
         st.session_state.show_form = False
+        # Update URL for future recovery
+        update_url_with_draft_id(draft_id)
         return True
     return False
 
@@ -1647,15 +1756,46 @@ def render_consigner_section():
 st.title("CBD Intake Form")
 
 # ============================================
+# SESSION RECOVERY CHECK
+# ============================================
+
+# Check for session recovery from URL on first load
+if not st.session_state.session_recovered:
+    query_params = st.query_params
+    draft_id = query_params.get("draft")
+    
+    if draft_id:
+        # Try to load the draft
+        if restore_draft_to_session(draft_id):
+            st.session_state.session_recovered = True
+            st.rerun()
+
+# ============================================
 # SIDEBAR: DRAFT MANAGEMENT
 # ============================================
 
 with st.sidebar:
     st.header("Saved Drafts")
     
-    # Auto-save current form button
-    if st.session_state.app_mode and st.session_state.num_items > 0:
-        if st.button("Save Current Draft", use_container_width=True):
+    # Current session info
+    if st.session_state.current_draft_id:
+        st.caption(f"Current: {st.session_state.current_draft_id}")
+        
+        # Permanent toggle
+        is_perm = st.checkbox(
+            "Keep permanently",
+            value=st.session_state.is_draft_permanent,
+            key="permanent_toggle",
+            help="Permanent drafts won't auto-delete after 24 hours"
+        )
+        if is_perm != st.session_state.is_draft_permanent:
+            st.session_state.is_draft_permanent = is_perm
+            set_draft_permanent(st.session_state.current_draft_id, is_perm)
+            st.success("Updated!")
+    
+    # Save button for current form
+    if st.session_state.app_mode and (st.session_state.num_items > 0 or st.session_state.form_values.get('customer_name')):
+        if st.button("💾 Save Now", use_container_width=True, type="primary"):
             save_form_values()
             draft_id = save_current_form_to_draft()
             st.success(f"Saved! ID: {draft_id}")
@@ -1666,10 +1806,11 @@ with st.sidebar:
     drafts = get_all_drafts()
     
     if drafts:
-        st.caption(f"Drafts auto-delete after {DRAFT_EXPIRY_HOURS} hours")
+        st.caption("Temporary drafts auto-delete after 24h")
+        st.caption("🔒 = Permanent")
         
         for draft in drafts:
-            draft_id, name, app_mode, created_at, updated_at = draft
+            draft_id, name, app_mode, created_at, updated_at, is_permanent = draft
             if app_mode == "detection":
                 mode_label = "Detection"
             elif app_mode == "email":
@@ -1677,17 +1818,25 @@ with st.sidebar:
             else:
                 mode_label = "General"
             
+            # Highlight current draft
+            is_current = draft_id == st.session_state.current_draft_id
+            
             with st.container():
-                st.markdown(f"**{name}**")
-                st.caption(f"{mode_label} | Updated: {updated_at[:16]}")
+                prefix = "🔒 " if is_permanent else ""
+                suffix = " ✓" if is_current else ""
+                st.markdown(f"**{prefix}{name}{suffix}**")
+                st.caption(f"{mode_label} | {updated_at[:16]}")
                 col1, col2 = st.columns(2)
                 with col1:
-                    if st.button("Load", key=f"load_{draft_id}", use_container_width=True):
+                    if st.button("Load", key=f"load_{draft_id}", use_container_width=True, disabled=is_current):
                         if restore_draft_to_session(draft_id):
                             st.rerun()
                 with col2:
                     if st.button("Delete", key=f"del_{draft_id}", use_container_width=True):
                         delete_draft(draft_id)
+                        if is_current:
+                            st.session_state.current_draft_id = None
+                            update_url_with_draft_id(None)
                         st.rerun()
                 st.divider()
     else:
@@ -1699,6 +1848,21 @@ with st.sidebar:
 
 if st.session_state.app_mode is None:
     st.markdown("---")
+    
+    # Check for recent draft to resume
+    recent_draft = get_most_recent_draft()
+    if recent_draft:
+        draft_id, name, app_mode, updated_at = recent_draft
+        st.info(f"📋 **Resume where you left off?**")
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.markdown(f"**{name}** - {app_mode.title()} mode")
+            st.caption(f"Last updated: {updated_at[:16]}")
+        with col2:
+            if st.button("Resume", use_container_width=True, type="primary"):
+                if restore_draft_to_session(draft_id):
+                    st.rerun()
+        st.markdown("---")
     
     st.markdown("""
     ### What would you like to do?
@@ -2036,6 +2200,8 @@ elif st.session_state.app_mode == "detection":
         with col1:
             if st.button("Done", use_container_width=True, type="primary"):
                 st.session_state.adding_photo_for_item = None
+                # Auto-save after photo capture
+                auto_save_draft()
                 st.rerun()
         
         with col2:
@@ -2115,12 +2281,16 @@ elif st.session_state.app_mode == "detection":
                     st.info("No distinct items detected. The image has been added - describe the item(s) manually below.")
                 
                 st.session_state.detection_complete = True
+                # Auto-save after detection
+                auto_save_draft()
                 st.rerun()
             
             st.markdown("---")
             if st.button("Add Items Manually (Skip Photo)", use_container_width=True):
                 st.session_state.detection_complete = True
                 st.session_state.num_items = 1
+                # Auto-save when starting manual entry
+                auto_save_draft()
                 st.rerun()
         
         else:
@@ -2196,12 +2366,14 @@ elif st.session_state.app_mode == "detection":
                     new_index = st.session_state.num_items
                     st.session_state.num_items += 1
                     st.session_state.adding_photo_for_item = new_index
+                    auto_save_draft()
                     st.rerun()
             
             with col2:
                 if st.button("Add Item (no photo)", use_container_width=True):
                     save_form_values()
                     st.session_state.num_items += 1
+                    auto_save_draft()
                     st.rerun()
             
             with col3:
@@ -2219,6 +2391,7 @@ elif st.session_state.app_mode == "detection":
                             if key in st.session_state.form_values:
                                 del st.session_state.form_values[key]
                         st.session_state.num_items -= 1
+                        auto_save_draft()
                         st.rerun()
             
             st.markdown("---")
@@ -2291,6 +2464,8 @@ elif st.session_state.app_mode == "general":
         with col1:
             if st.button("Done", use_container_width=True, type="primary"):
                 st.session_state.adding_photo_for_item = None
+                # Auto-save after photo capture
+                auto_save_draft()
                 st.rerun()
         
         with col2:
@@ -2369,12 +2544,14 @@ elif st.session_state.app_mode == "general":
                 new_index = st.session_state.num_items
                 st.session_state.num_items += 1
                 st.session_state.adding_photo_for_item = new_index
+                auto_save_draft()
                 st.rerun()
         
         with col2:
             if st.button("Add Item (no photo)", use_container_width=True):
                 save_form_values()
                 st.session_state.num_items += 1
+                auto_save_draft()
                 st.rerun()
         
         with col3:
@@ -2392,6 +2569,7 @@ elif st.session_state.app_mode == "general":
                         if key in st.session_state.form_values:
                             del st.session_state.form_values[key]
                     st.session_state.num_items -= 1
+                    auto_save_draft()
                     st.rerun()
         
         st.markdown("---")
@@ -2466,6 +2644,8 @@ elif st.session_state.app_mode == "email":
         with col1:
             if st.button("Done", use_container_width=True, type="primary"):
                 st.session_state.adding_photo_for_item = None
+                # Auto-save after photo capture
+                auto_save_draft()
                 st.rerun()
         
         with col2:
@@ -2873,12 +3053,14 @@ elif st.session_state.app_mode == "email":
                         new_index = st.session_state.num_items
                         st.session_state.num_items += 1
                         st.session_state.adding_photo_for_item = new_index
+                        auto_save_draft()
                         st.rerun()
                 
                 with col2:
                     if st.button("Add Item (no photo)", key="email_add_no_photo", use_container_width=True):
                         save_form_values()
                         st.session_state.num_items += 1
+                        auto_save_draft()
                         st.rerun()
                 
                 with col3:
@@ -2894,6 +3076,7 @@ elif st.session_state.app_mode == "email":
                                 if key in st.session_state.form_values:
                                     del st.session_state.form_values[key]
                             st.session_state.num_items -= 1
+                            auto_save_draft()
                             st.rerun()
                 
                 st.markdown("---")
